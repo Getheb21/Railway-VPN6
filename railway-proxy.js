@@ -1,195 +1,102 @@
 const express = require('express');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 const WebSocket = require('ws');
-const fetch = require('node-fetch');
+const { connect } = require('net');
 const crypto = require('crypto');
+const fetch = require('node-fetch');
 
-// ======================
-// CONFIGURASI
-// ======================
-const CONFIG = {
-  PORT: process.env.PORT || 3000,
-  HOST: '0.0.0.0', // Railway memerlukan ini
-  SERVICE_NAME: process.env.SERVICE_NAME || 'railway-vpn5',
-  PROXY_BANK_URL: process.env.PROXY_BANK_URL || 'https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/proxyList.txt',
-  PROXY_PER_PAGE: 20,
-  CACHE_DURATION: 300000 // 5 menit
+// Variables
+const rootDomain = "lifetime01.workers.dev"; // Ganti dengan domain utama kalian
+const serviceName = "vip"; // Ganti dengan nama workers kalian
+const proxyIP = "https://github.com/FoolVPN-ID/Nautica/blob/main/proxyList.txt";
+let cachedProxyList = [];
+
+// Constants
+const APP_DOMAIN = `${serviceName}.${rootDomain}`;
+const PORTS = [443, 80];
+const PROTOCOLS = ["trojan", "vless", "ss"];
+const KV_PROXY_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/kvProxyList.json";
+const PROXY_BANK_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/proxyList.txt";
+const DNS_SERVER_ADDRESS = "8.8.8.8";
+const DNS_SERVER_PORT = 53;
+const PROXY_HEALTH_CHECK_API = "https://id1.foolvpn.me/api/v1/check";
+const CONVERTER_URL = "https://api.foolvpn.me/convert";
+const DONATE_LINK = "google.com";
+const PROXY_PER_PAGE = 24;
+const CORS_HEADER_OPTIONS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
+  "Access-Control-Max-Age": "86400",
 };
 
-console.log('🚀 Starting Railway Proxy Server...');
-console.log(`Port: ${CONFIG.PORT}`);
-console.log(`Service: ${CONFIG.SERVICE_NAME}`);
-
-// ======================
-// INIT APP
-// ======================
 const app = express();
 const server = require('http').createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// Middleware sederhana
+async function getKVProxyList(kvProxyUrl = KV_PROXY_URL) {
+  if (!kvProxyUrl) throw new Error("No KV Proxy URL Provided!");
+  const kvProxy = await fetch(kvProxyUrl);
+  return kvProxy.status === 200 ? await kvProxy.json() : {};
+}
+
+async function getProxyList(proxyBankUrl = PROXY_BANK_URL) {
+  if (!proxyBankUrl) throw new Error("No Proxy Bank URL Provided!");
+  const proxyBank = await fetch(proxyBankUrl);
+  
+  if (proxyBank.status === 200) {
+    const text = await proxyBank.text();
+    const proxyString = text.split("\n").filter(Boolean);
+    cachedProxyList = proxyString.map((entry) => {
+      const [proxyIP, proxyPort, country, org] = entry.split(",");
+      return {
+        proxyIP: proxyIP || "Unknown",
+        proxyPort: proxyPort || "Unknown",
+        country: country || "Unknown",
+        org: org || "Unknown Org",
+      };
+    }).filter(Boolean);
+  }
+  return cachedProxyList;
+}
+
+function generateUUID() {
+  return crypto.randomUUID();
+}
+
+function reverse(s) {
+  return s.split("").reverse().join("");
+}
+
+function getFlagEmoji(isoCode) {
+  const codePoints = isoCode.toUpperCase().split("").map(char => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+}
+
+// Middleware
+app.use(express.json());
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  Object.entries(CORS_HEADER_OPTIONS).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
   next();
 });
 
-app.use(express.json());
-
-// ======================
-// HEALTH CHECK ENDPOINT (WAJIB untuk Railway)
-// ======================
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: CONFIG.SERVICE_NAME,
-    message: 'Railway Proxy Server is running',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      subscription: '/sub/:page',
-      api: '/api/v1/sub',
-      health: '/health',
-      check: '/check',
-      myip: '/api/v1/myip'
-    }
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/status', (req, res) => {
-  res.json({
-    status: 'online',
-    service: CONFIG.SERVICE_NAME,
-    port: CONFIG.PORT,
-    timestamp: new Date().toISOString(),
-    node_version: process.version
-  });
-});
-
-// ======================
-// HELPER FUNCTIONS
-// ======================
-let cachedProxies = [];
-let lastCacheUpdate = 0;
-
-function generateUUID() {
-  return crypto.randomUUID ? crypto.randomUUID() : 
-    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
-}
-
-async function fetchProxyList() {
-  try {
-    console.log('📥 Fetching proxy list...');
-    const response = await fetch(CONFIG.PROXY_BANK_URL, {
-      timeout: 10000
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const text = await response.text();
-    const lines = text.trim().split('\n').filter(line => line.trim());
-    
-    cachedProxies = lines.map((line, index) => {
-      const parts = line.split(',');
-      return {
-        id: index + 1,
-        ip: parts[0]?.trim() || 'Unknown',
-        port: parts[1]?.trim() || 'Unknown',
-        country: parts[2]?.trim() || 'Unknown',
-        org: parts[3]?.trim() || 'Unknown',
-        raw: line
-      };
-    });
-    
-    lastCacheUpdate = Date.now();
-    console.log(`✅ Loaded ${cachedProxies.length} proxies`);
-    return cachedProxies;
-  } catch (error) {
-    console.error('❌ Error fetching proxies:', error.message);
-    return cachedProxies.length > 0 ? cachedProxies : [];
-  }
-}
-
-// ======================
-// ROUTES
-// ======================
+// Routes
 app.get('/sub/:page?', async (req, res) => {
   try {
     const page = parseInt(req.params.page) || 0;
-    const hostname = req.get('host') || 'localhost:' + CONFIG.PORT;
+    const hostname = req.get('host');
+    const countrySelect = req.query.cc?.split(',');
+    const proxyBankUrl = req.query['proxy-list'] || PROXY_BANK_URL;
     
-    const proxies = await fetchProxyList();
-    const start = page * CONFIG.PROXY_PER_PAGE;
-    const end = start + CONFIG.PROXY_PER_PAGE;
-    const pageProxies = proxies.slice(start, end);
-    
-    const html = generateHTML(pageProxies, page, hostname);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (error) {
-    res.status(500).send(`Error: ${error.message}`);
-  }
-});
-
-app.get('/api/v1/sub', async (req, res) => {
-  try {
-    const format = req.query.format || 'raw';
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-    const hostname = req.get('host') || 'localhost:' + CONFIG.PORT;
-    
-    const proxies = await fetchProxyList();
-    const selectedProxies = proxies.slice(0, limit);
-    
-    const configs = [];
-    const uuid = generateUUID();
-    
-    selectedProxies.forEach(proxy => {
-      // VLESS TLS
-      configs.push(`vless://${uuid}@${hostname}:443?type=ws&security=tls&host=${hostname}&path=/${proxy.ip}-${proxy.port}#${proxy.country}-TLS`);
-      // VLESS NTLS
-      configs.push(`vless://${uuid}@${hostname}:80?type=ws&security=none&host=${hostname}&path=/${proxy.ip}-${proxy.port}#${proxy.country}-NTLS`);
-      // Trojan TLS
-      configs.push(`trojan://${uuid}@${hostname}:443?type=ws&security=tls&host=${hostname}&path=/${proxy.ip}-${proxy.port}#${proxy.country}-TLS`);
-      // Trojan NTLS
-      configs.push(`trojan://${uuid}@${hostname}:80?type=ws&security=none&host=${hostname}&path=/${proxy.ip}-${proxy.port}#${proxy.country}-NTLS`);
+    let proxyList = (await getProxyList(proxyBankUrl)).filter(proxy => {
+      if (countrySelect) return countrySelect.includes(proxy.country);
+      return true;
     });
-    
-    let output = configs.join('\n');
-    
-    if (['clash', 'sfa', 'bfr'].includes(format)) {
-      try {
-        const converterRes = await fetch('https://api.foolvpn.me/convert', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: configs.join(','),
-            format: format,
-            template: 'cf'
-          })
-        });
-        
-        if (converterRes.ok) {
-          output = await converterRes.text();
-        }
-      } catch (error) {
-        console.error('Converter error:', error.message);
-      }
-    }
-    
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.send(output);
+
+    const configs = generateConfigs(hostname, proxyList, page);
+    res.setHeader('Content-Type', 'text/html;charset=utf-8');
+    res.send(configs);
   } catch (error) {
     res.status(500).send(`Error: ${error.message}`);
   }
@@ -197,134 +104,199 @@ app.get('/api/v1/sub', async (req, res) => {
 
 app.get('/check', async (req, res) => {
   try {
-    const target = req.query.target;
-    if (!target) {
-      return res.status(400).json({ error: 'Target required' });
-    }
-    
-    // Simulasi check sederhana
-    res.json({
-      target: target,
-      status: 'unknown',
-      message: 'Health check simulated',
-      timestamp: new Date().toISOString()
-    });
+    const target = req.query.target.split(':');
+    const result = await checkProxyHealth(target[0], target[1] || '443');
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+app.get('/api/v1/sub', async (req, res) => {
+  try {
+    const filterCC = req.query.cc?.split(',') || [];
+    const filterPort = req.query.port?.split(',') || PORTS;
+    const filterVPN = req.query.vpn?.split(',') || PROTOCOLS;
+    const filterLimit = parseInt(req.query.limit) || 10;
+    const filterFormat = req.query.format || 'raw';
+    const fillerDomain = req.query.domain || APP_DOMAIN;
+    const proxyBankUrl = req.query['proxy-list'] || PROXY_BANK_URL;
+
+    let proxyList = await getProxyList(proxyBankUrl);
+    if (filterCC.length > 0) {
+      proxyList = proxyList.filter(proxy => filterCC.includes(proxy.country));
+    }
+
+    // Shuffle
+    proxyList.sort(() => Math.random() - 0.5);
+
+    const uuid = generateUUID();
+    const result = [];
+    for (const proxy of proxyList) {
+      if (result.length >= filterLimit) break;
+      
+      for (const port of filterPort) {
+        for (const protocol of filterVPN) {
+          if (result.length >= filterLimit) break;
+          
+          const uri = new URL(`${protocol}://${fillerDomain}`);
+          uri.username = protocol === 'ss' ? Buffer.from(`none:${uuid}`).toString('base64') : uuid;
+          uri.port = port.toString();
+          uri.searchParams.set('encryption', 'none');
+          uri.searchParams.set('type', 'ws');
+          uri.searchParams.set('host', APP_DOMAIN);
+          uri.searchParams.set('security', port === 443 ? 'tls' : 'none');
+          uri.searchParams.set('sni', port === 80 && protocol === 'vless' ? '' : APP_DOMAIN);
+          uri.searchParams.set('path', `/${proxy.proxyIP}-${proxy.proxyPort}`);
+          
+          if (protocol === 'ss') {
+            uri.searchParams.set('plugin', `v2ray-plugin${port === 80 ? '' : ';tls'};mux=0;mode=websocket;path=/${proxy.proxyIP}-${proxy.proxyPort};host=${APP_DOMAIN}`);
+          }
+          
+          uri.hash = `${result.length + 1} ${getFlagEmoji(proxy.country)} ${proxy.org} WS ${port === 443 ? 'TLS' : 'NTLS'} [${serviceName}]`;
+          result.push(uri.toString());
+        }
+      }
+    }
+
+    let finalResult = result.join('\n');
+    if (['clash', 'sfa', 'bfr'].includes(filterFormat)) {
+      const converterRes = await fetch(CONVERTER_URL, {
+        method: 'POST',
+        body: JSON.stringify({
+          url: result.join(','),
+          format: filterFormat,
+          template: 'cf',
+        }),
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (converterRes.ok) {
+        finalResult = await converterRes.text();
+      } else {
+        return res.status(converterRes.status).send(converterRes.statusText);
+      }
+    }
+
+    res.send(finalResult);
+  } catch (error) {
+    res.status(500).send(`Error: ${error.message}`);
+  }
+});
+
 app.get('/api/v1/myip', (req, res) => {
-  const ip = req.headers['x-forwarded-for'] || 
-             req.headers['x-real-ip'] || 
-             req.connection.remoteAddress;
-  
+  const ip = req.headers['cf-connecting-ip'] || req.headers['x-real-ip'] || req.ip;
   res.json({
-    ip: ip,
-    hostname: req.get('host'),
-    userAgent: req.get('user-agent'),
-    timestamp: new Date().toISOString()
+    ip,
+    colo: req.headers['cf-ray']?.split('-')[1] || 'unknown',
+    country: req.headers['cf-ipcountry'] || 'unknown',
+    asOrganization: req.headers['cf-ray']?.split('-')[1] || 'unknown'
   });
 });
 
-// ======================
-// HTML GENERATOR
-// ======================
-function generateHTML(proxies, page, hostname) {
-  const totalPages = Math.ceil((cachedProxies.length || 1) / CONFIG.PROXY_PER_PAGE);
-  
-  return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${CONFIG.SERVICE_NAME} - Railway</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-900 text-white">
-<div class="container mx-auto p-4">
-    <h1 class="text-3xl font-bold text-center mb-6 text-green-400">🚀 ${CONFIG.SERVICE_NAME}</h1>
-    <p class="text-center mb-8">Host: ${hostname} | Proxies: ${cachedProxies.length} | Page: ${page + 1}/${totalPages}</p>
-    
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-        ${proxies.map(proxy => `
-        <div class="bg-gray-800 p-4 rounded-lg">
-            <div class="flex justify-between items-center mb-3">
-                <h3 class="text-xl font-bold">${proxy.country}</h3>
-                <span class="bg-gray-700 px-3 py-1 rounded">${proxy.org}</span>
-            </div>
-            <p class="text-gray-300 mb-2">IP: ${proxy.ip}:${proxy.port}</p>
-            <div class="space-y-2">
-                <button onclick="copyConfig('vless://${generateUUID()}@${hostname}:443?type=ws&security=tls&path=/${proxy.ip}-${proxy.port}#${proxy.country}')"
-                        class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded">
-                    Copy VLESS TLS
-                </button>
-                <button onclick="copyConfig('trojan://${generateUUID()}@${hostname}:443?type=ws&security=tls&path=/${proxy.ip}-${proxy.port}#${proxy.country}')"
-                        class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded">
-                    Copy Trojan TLS
-                </button>
-            </div>
-        </div>
-        `).join('')}
-    </div>
-    
-    <div class="flex justify-center space-x-4 mb-8">
-        ${page > 0 ? `<a href="/sub/${page - 1}" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">← Previous</a>` : ''}
-        ${page < totalPages - 1 ? `<a href="/sub/${page + 1}" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">Next →</a>` : ''}
-    </div>
-    
-    <div class="text-center text-gray-400">
-        <p>Powered by Railway • <a href="/api/v1/sub?format=clash" class="text-green-400">Download Clash Config</a></p>
-    </div>
-</div>
+// WebSocket Handler
+wss.on('connection', async (ws, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  let targetProxy = proxyIP;
 
-<script>
-    async function copyConfig(config) {
-        try {
-            await navigator.clipboard.writeText(config);
-            alert('Config copied to clipboard!');
-        } catch (err) {
-            prompt('Copy this config:', config);
-        }
+  try {
+    if (url.pathname.length === 3 || url.pathname.includes(',')) {
+      const proxyKeys = url.pathname.replace('/', '').toUpperCase().split(',');
+      const proxyKey = proxyKeys[Math.floor(Math.random() * proxyKeys.length)];
+      const kvProxy = await getKVProxyList();
+      if (kvProxy[proxyKey]) {
+        targetProxy = kvProxy[proxyKey][Math.floor(Math.random() * kvProxy[proxyKey].length)];
+      }
+    } else {
+      const match = url.pathname.match(/^\/(.+[:=-]\d+)$/);
+      if (match) targetProxy = match[1];
     }
-</script>
-</body>
-</html>`;
+
+    handleWebSocketConnection(ws, targetProxy);
+  } catch (error) {
+    ws.close(1011, error.message);
+  }
+});
+
+// Helper functions
+function generateConfigs(hostname, proxyList, page) {
+  const startIndex = PROXY_PER_PAGE * page;
+  const uuid = generateUUID();
+  let html = '<html><head><title>Proxy List</title></head><body>';
+  html += `<h1>Total: ${proxyList.length} | Page: ${page}</h1>`;
+
+  for (let i = startIndex; i < startIndex + PROXY_PER_PAGE; i++) {
+    const proxy = proxyList[i];
+    if (!proxy) break;
+
+    html += `<div style="border:1px solid #ccc;padding:10px;margin:10px">`;
+    html += `<h3>${proxy.country} - ${proxy.org}</h3>`;
+    html += `<p>IP: ${proxy.proxyIP} | Port: ${proxy.proxyPort}</p>`;
+
+    for (const port of PORTS) {
+      for (const protocol of PROTOCOLS) {
+        const config = generateConfig(hostname, proxy, uuid, port, protocol);
+        html += `<div style="margin:5px 0"><code>${config}</code></div>`;
+      }
+    }
+    html += `</div>`;
+  }
+
+  html += '</body></html>';
+  return html;
 }
 
-// ======================
-// START SERVER
-// ======================
-async function startServer() {
-  try {
-    // Initial proxy fetch
-    await fetchProxyList();
-    
-    // Start server
-    server.listen(CONFIG.PORT, CONFIG.HOST, () => {
-      console.log(`✅ Server running on http://${CONFIG.HOST}:${CONFIG.PORT}`);
-      console.log(`📡 Health check: http://${CONFIG.HOST}:${CONFIG.PORT}/health`);
-      console.log(`🌐 Web interface: http://${CONFIG.HOST}:${CONFIG.PORT}/sub/0`);
-      console.log(`🔧 API: http://${CONFIG.HOST}:${CONFIG.PORT}/api/v1/sub`);
-    });
-    
-    // Auto-refresh proxies every 5 minutes
-    setInterval(fetchProxyList, CONFIG.CACHE_DURATION);
-    
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+function generateConfig(hostname, proxy, uuid, port, protocol) {
+  const config = {
+    host: hostname,
+    port: port,
+    uuid: uuid,
+    path: `/${proxy.proxyIP}-${proxy.proxyPort}`,
+    security: port === 443 ? 'tls' : 'none',
+    sni: port === 80 && protocol === 'vless' ? '' : hostname,
+    type: 'ws',
+    encryption: 'none'
+  };
+
+  switch (protocol) {
+    case 'vless':
+      return `vless://${uuid}@${hostname}:${port}?type=ws&security=${config.security}&path=${config.path}#${proxy.country}`;
+    case 'trojan':
+      return `trojan://${uuid}@${hostname}:${port}?type=ws&security=${config.security}&path=${config.path}#${proxy.country}`;
+    case 'ss':
+      const ssUser = Buffer.from(`none:${uuid}`).toString('base64');
+      return `ss://${ssUser}@${hostname}:${port}?plugin=v2ray-plugin${port === 80 ? '' : ';tls'}&path=${config.path}#${proxy.country}`;
   }
 }
 
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
+async function checkProxyHealth(ip, port) {
+  const res = await fetch(`${PROXY_HEALTH_CHECK_API}?ip=${ip}:${port}`);
+  return await res.json();
+}
 
-// Start the server
-startServer();
+function handleWebSocketConnection(ws, targetProxy) {
+  ws.on('message', async (message) => {
+    try {
+      // Parse protocol and handle connection
+      // (Simplified - actual implementation would need full protocol parsing)
+      const [host, port] = targetProxy.split(/[:=-]/);
+      const socket = connect(parseInt(port) || 443, host);
+      
+      socket.on('data', (data) => ws.send(data));
+      socket.on('error', (err) => ws.close(1011, err.message));
+      
+      socket.write(message);
+      
+      ws.on('message', (msg) => socket.write(msg));
+      ws.on('close', () => socket.end());
+      
+    } catch (error) {
+      ws.close(1011, error.message);
+    }
+  });
+}
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
