@@ -1,8 +1,5 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm install"
 
 [deploy]
-startCommand = "npm start"
-healthcheckPath = "/"
-healthcheckTimeout = 30
+startCommand = "deno run --allow-net deno.js"
