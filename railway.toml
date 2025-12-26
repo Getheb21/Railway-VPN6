@@ -1,5 +1,10 @@
 [build]
 builder = "nixpacks"
-
+ 
 [deploy]
-startCommand = "deno run --allow-net deno.js"
+startCommand = "npm start"
+ 
+[[services]]
+port = 3000
+protocol = "tcp"
+autostart = true
