@@ -1,20 +1,15 @@
 {
-  "name": "railway-vpn-proxy",
+  "name": "railway-vpn-minimal",
   "version": "1.0.0",
-  "description": "Simple VPN Proxy Server for Railway",
-  "main": "railway-proxy.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node railway-proxy.js",
-    "test": "echo \"No tests\" && exit 0"
+    "start": "node index.js",
+    "test": "echo \"No test specified\" && exit 0"
   },
-  "keywords": ["railway", "vpn", "proxy", "vless", "trojan"],
-  "author": "kuncung",
-  "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^2.6.12"
+    "express": "^4.18.2"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   }
 }
